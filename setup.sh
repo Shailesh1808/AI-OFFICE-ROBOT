@@ -61,8 +61,12 @@ if [ ! -f "$ROS_SETUP" ]; then
     err "Install ROS2 $ROS_DISTRO first, then re-run setup.sh"
     exit 1
 fi
+# ROS2 setup.bash references AMENT_TRACE_SETUP_FILES without initialising it,
+# which trips bash's -u (nounset) flag. Lift it around the source call.
+set +u
 # shellcheck source=/dev/null
 source "$ROS_SETUP"
+set -u
 info "ROS2 $ROS_DISTRO sourced."
 
 # ── 6. Build ROS2 package ─────────────────────────────────────────────────────

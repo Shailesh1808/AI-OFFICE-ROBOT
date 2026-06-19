@@ -30,10 +30,14 @@ if [ ! -f "$WS_SETUP" ]; then
 fi
 
 # ── 3. Source both ROS2 and the workspace ─────────────────────────────────────
+# ROS2 setup files reference AMENT_TRACE_SETUP_FILES without initialising it;
+# lift -u (nounset) around both source calls to avoid "unbound variable" errors.
+set +u
 # shellcheck source=/dev/null
 source "$ROS_SETUP"
 # shellcheck source=/dev/null
 source "$WS_SETUP"
+set -u
 info "ROS2 $ROS_DISTRO + workspace sourced."
 
 # ── 4. Start ollama if it is not already running ──────────────────────────────
