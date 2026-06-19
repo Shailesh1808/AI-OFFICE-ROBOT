@@ -39,10 +39,15 @@ class ASRNode(Node):
             try:
                 self.get_logger().info(f'Loading Whisper "{MODEL_SIZE}" on {device} ({ctype}) …')
                 model = WhisperModel(MODEL_SIZE, device=device, compute_type=ctype)
+                # Run a silent dummy inference to validate CUDA libraries are
+                # actually reachable (libcublas etc). The model can load fine
+                # but blow up on first real transcription otherwise.
+                dummy = np.zeros(ASR_RATE, dtype=np.float32)
+                list(model.transcribe(dummy, language='en', beam_size=1)[0])
                 self.get_logger().info(f'Whisper ready on {device}.')
                 return model
             except Exception as exc:
-                self.get_logger().warn(f'{device} unavailable: {exc}')
+                self.get_logger().warn(f'{device} unavailable ({exc}), trying next …')
         raise RuntimeError('Could not load Whisper on CUDA or CPU.')
 
     def _on_audio(self, msg: UInt8MultiArray):
