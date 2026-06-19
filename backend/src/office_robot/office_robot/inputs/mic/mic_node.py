@@ -53,18 +53,19 @@ class MicNode(Node):
         self._vad = webrtcvad.Vad(VAD_MODE)
         self._pa = pyaudio.PyAudio()
 
-        self._device_idx = self._find_device(hint)
-        self._stream, self._capture_rate, self._capture_channels = self._open_stream(self._device_idx)
-
+        # Initialise all state BEFORE opening the stream — PyAudio auto-starts
+        # the callback thread on pa.open(), so _raw_q must exist beforehand.
         self._raw_q: queue.Queue[bytes] = queue.Queue(maxsize=300)
         self._ratecv_state = None
         self._vad_buf = b''
-
         self._pre_buf: collections.deque[bytes] = collections.deque(maxlen=PRE_SPEECH_FRAMES)
         self._speech_frames: list[bytes] = []
         self._is_speaking = False
         self._voiced_count = 0
         self._silence_count = 0
+
+        self._device_idx = self._find_device(hint)
+        self._stream, self._capture_rate, self._capture_channels = self._open_stream(self._device_idx)
 
         threading.Thread(target=self._process_loop, daemon=True, name='mic_proc').start()
 
@@ -131,12 +132,13 @@ class MicNode(Node):
                         input_device_index=device_idx,
                         frames_per_buffer=chunk,
                         stream_callback=self._audio_cb,
+                        start=False,  # don't fire callback until start_stream() is called
                     )
                     self.get_logger().info(
                         f'Audio stream opened: {rate} Hz, {channels}ch'
                     )
                     return stream, rate, channels
-                except OSError:
+                except Exception:
                     continue
 
         raise RuntimeError(
