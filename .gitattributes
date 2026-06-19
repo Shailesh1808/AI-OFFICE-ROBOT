@@ -1,0 +1,12 @@
+# Force LF on all text files so shell scripts and Python work on the Jetson (Linux)
+* text=auto eol=lf
+
+# Explicitly mark shell scripts
+*.sh text eol=lf
+
+# Python
+*.py text eol=lf
+
+# ROS2 / XML
+*.xml text eol=lf
+*.cfg text eol=lf

@@ -1,0 +1,30 @@
+# Claude Code internal files
+.claude/
+
+# ROS2 / colcon build output
+backend/build/
+backend/install/
+backend/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Models / large binaries (downloaded at runtime)
+*.onnx
+*.pt
+*.bin
+*.gguf
+
+# OS
+.DS_Store
+Thumbs.db
