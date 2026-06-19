@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-inputs/mic/mic_node.py — XMOS XVF3800 capture + VAD.
+inputs/mic/mic_node.py — microphone capture + VAD.
 
-Captures audio from the XVF3800 (4-mic array, 2-ch USB, 16 kHz or 48 kHz),
-runs webrtcvad to segment speech from silence, and publishes each complete
-utterance as raw PCM bytes.
+Works with:
+  - XMOS XVF3800 (4-mic array, 2-ch USB, robot hardware)
+  - Any standard laptop/desktop microphone (1 or 2 ch, WSL2 / native Linux)
+
+Channel count and sample rate are auto-detected from the device.
 
 Publishes: /inputs/mic/audio_segment  (std_msgs/UInt8MultiArray)
   — 16-bit PCM, mono, 16000 Hz, little-endian; one complete utterance per msg
@@ -25,8 +27,8 @@ from std_msgs.msg import UInt8MultiArray
 
 # ── Audio constants ────────────────────────────────────────────────────────────
 ASR_RATE = 16000
-CAPTURE_CHANNELS = 2       # XVF3800 outputs 2 beamformed channels
 SAMPLE_WIDTH = 2           # 16-bit PCM
+# CAPTURE_CHANNELS is auto-detected per device (see _open_stream)
 
 VAD_FRAME_MS = 20          # webrtcvad supports 10 / 20 / 30 ms
 VAD_FRAME_BYTES = int(ASR_RATE * VAD_FRAME_MS / 1000) * SAMPLE_WIDTH  # 640 bytes
@@ -52,7 +54,7 @@ class MicNode(Node):
         self._pa = pyaudio.PyAudio()
 
         self._device_idx = self._find_device(hint)
-        self._stream, self._capture_rate = self._open_stream(self._device_idx)
+        self._stream, self._capture_rate, self._capture_channels = self._open_stream(self._device_idx)
 
         self._raw_q: queue.Queue[bytes] = queue.Queue(maxsize=300)
         self._ratecv_state = None
@@ -69,7 +71,8 @@ class MicNode(Node):
         self._stream.start_stream()
         name = self._pa.get_device_info_by_index(self._device_idx)['name']
         self.get_logger().info(
-            f'Mic node running — [{self._device_idx}] {name!r} @ {self._capture_rate} Hz'
+            f'Mic node running — [{self._device_idx}] {name!r} '
+            f'@ {self._capture_rate} Hz, {self._capture_channels}ch'
         )
 
     # ── Device detection ───────────────────────────────────────────────────────
@@ -84,40 +87,61 @@ class MicNode(Node):
             if info['maxInputChannels'] < 1:
                 continue
             name = info['name']
-            self.get_logger().info(f'  [{i}] {name}  ({int(info["defaultSampleRate"])} Hz)')
+            self.get_logger().info(f'  [{i}] {name}  ({int(info["defaultSampleRate"])} Hz, {int(info["maxInputChannels"])}ch)')
             if first_input is None:
                 first_input = i
+            # Match XVF3800 aliases first; hint='xvf' won't match a laptop mic
+            # so we fall through to the default device naturally
             for alias in (hint, 'respeaker', 'xmos', 'xvf', 'vocal'):
                 if alias.lower() in name.lower():
                     self.get_logger().info(f'Selected [{i}] via "{alias}"')
                     return i
 
+        # Fall back to system default input (laptop mic on WSL2 / desktop)
+        try:
+            default_idx = self._pa.get_default_input_device_info()['index']
+            self.get_logger().info(
+                f'No XVF3800 found — using default input device [{default_idx}]. '
+                f'Override with ROS param device_name_hint if needed.'
+            )
+            return default_idx
+        except OSError:
+            pass
+
         idx = first_input if first_input is not None else 0
-        self.get_logger().warn(
-            f'XVF3800 not found. Using [{idx}]. '
-            f'Run find_audio_device.py then set param device_name_hint.'
-        )
+        self.get_logger().warn(f'Using first available input device [{idx}].')
         return idx
 
     def _open_stream(self, device_idx: int):
+        """Try common rates and channel counts; auto-detect what the device supports."""
+        info = self._pa.get_device_info_by_index(device_idx)
+        max_ch = int(info['maxInputChannels'])
+        # Prefer stereo for XVF3800; fall back to mono for laptop mics
+        channel_options = [2, 1] if max_ch >= 2 else [1]
+
         for rate in (16000, 48000):
-            chunk = int(rate * VAD_FRAME_MS / 1000)
-            try:
-                stream = self._pa.open(
-                    format=pyaudio.paInt16,
-                    channels=CAPTURE_CHANNELS,
-                    rate=rate,
-                    input=True,
-                    input_device_index=device_idx,
-                    frames_per_buffer=chunk,
-                    stream_callback=self._audio_cb,
-                )
-                self.get_logger().info(f'Audio stream opened at {rate} Hz')
-                return stream, rate
-            except OSError as err:
-                self.get_logger().warn(f'{rate} Hz not supported: {err}')
+            for channels in channel_options:
+                chunk = int(rate * VAD_FRAME_MS / 1000)
+                try:
+                    stream = self._pa.open(
+                        format=pyaudio.paInt16,
+                        channels=channels,
+                        rate=rate,
+                        input=True,
+                        input_device_index=device_idx,
+                        frames_per_buffer=chunk,
+                        stream_callback=self._audio_cb,
+                    )
+                    self.get_logger().info(
+                        f'Audio stream opened: {rate} Hz, {channels}ch'
+                    )
+                    return stream, rate, channels
+                except OSError:
+                    continue
+
         raise RuntimeError(
-            f'Cannot open device [{device_idx}] at 16000 or 48000 Hz.'
+            f'Cannot open device [{device_idx}] at any supported rate/channel combo. '
+            f'Run find_audio_device.py to inspect the device.'
         )
 
     # ── PyAudio callback ───────────────────────────────────────────────────────
@@ -143,8 +167,10 @@ class MicNode(Node):
                 self.get_logger().error(f'Process error: {exc}')
 
     def _process_chunk(self, raw_bytes: bytes):
-        stereo = np.frombuffer(raw_bytes, dtype=np.int16)
-        mono = stereo[::2].copy()  # left channel = beamformed output
+        samples = np.frombuffer(raw_bytes, dtype=np.int16)
+        # Stereo → mono: take channel 0 (every other sample).
+        # Mono: use as-is.
+        mono = samples[::self._capture_channels].copy()
 
         if self._capture_rate != ASR_RATE:
             mono_bytes, self._ratecv_state = audioop.ratecv(

@@ -13,7 +13,9 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 # Substring matched against PyAudio device name (case-insensitive).
-                # Run `python3 find_audio_device.py` on the Jetson to find the value.
+                # Robot (Jetson + XVF3800): keep as 'xvf'
+                # Laptop / WSL2:           change to '' to use the system default mic,
+                #                          or set to a substring from find_audio_device.py
                 'device_name_hint': 'xvf',
             }],
         ),
