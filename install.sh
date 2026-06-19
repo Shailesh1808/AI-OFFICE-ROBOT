@@ -19,7 +19,7 @@ echo "=================================================="
 info "System packages..."
 sudo apt-get update -qq
 sudo apt-get install -y \
-    python3-dev build-essential \
+    python3-dev python3-pip build-essential \
     portaudio19-dev python3-pyaudio \
     espeak-ng libasound2-dev libsndfile1-dev \
     curl git
