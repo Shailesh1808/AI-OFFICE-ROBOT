@@ -3,22 +3,24 @@
 inputs/mic/mic_node.py — microphone capture + VAD.
 
 Works with:
-  - XMOS XVF3800 (4-mic array, 2-ch USB, robot hardware)
-  - Any standard laptop/desktop microphone (1 or 2 ch, WSL2 / native Linux)
+  - XMOS XVF3800 (4-mic array, robot hardware)
+  - Any standard USB microphone or laptop mic
 
-Channel count and sample rate are auto-detected from the device.
+Uses arecord (ALSA plughw) for capture — bypasses PyAudio entirely, which
+avoids channel-count validation failures and Python 3.10 C-API issues.
+Rate conversion and channel downmix are handled by the ALSA plug layer.
 
 Publishes: /inputs/mic/audio_segment  (std_msgs/UInt8MultiArray)
   — 16-bit PCM, mono, 16000 Hz, little-endian; one complete utterance per msg
 """
 
-import audioop
 import collections
-import queue
+import re
+import subprocess
 import threading
+import time
 
 import numpy as np
-import pyaudio
 import webrtcvad
 
 import rclpy
@@ -28,7 +30,6 @@ from std_msgs.msg import UInt8MultiArray
 # ── Audio constants ────────────────────────────────────────────────────────────
 ASR_RATE = 16000
 SAMPLE_WIDTH = 2           # 16-bit PCM
-# CAPTURE_CHANNELS is auto-detected per device (see _open_stream)
 
 VAD_FRAME_MS = 20          # webrtcvad supports 10 / 20 / 30 ms
 VAD_FRAME_BYTES = int(ASR_RATE * VAD_FRAME_MS / 1000) * SAMPLE_WIDTH  # 640 bytes
@@ -51,142 +52,139 @@ class MicNode(Node):
         self._pub = self.create_publisher(
             UInt8MultiArray, '/inputs/mic/audio_segment', 10)
         self._vad = webrtcvad.Vad(VAD_MODE)
-        self._pa = pyaudio.PyAudio()
 
-        # Initialise all state BEFORE opening the stream — PyAudio auto-starts
-        # the callback thread on pa.open(), so _raw_q must exist beforehand.
-        self._raw_q: queue.Queue[bytes] = queue.Queue(maxsize=300)
-        self._ratecv_state = None
-        self._vad_buf = b''
         self._pre_buf: collections.deque[bytes] = collections.deque(maxlen=PRE_SPEECH_FRAMES)
         self._speech_frames: list[bytes] = []
         self._is_speaking = False
         self._voiced_count = 0
         self._silence_count = 0
 
-        self._device_idx = self._find_device(hint)
-        self._stream, self._capture_rate, self._capture_channels = self._open_stream(self._device_idx)
+        alsa_dev = self._find_alsa_device(hint)
+        self._proc, self._capture_channels = self._open_capture(hint, alsa_dev)
 
-        threading.Thread(target=self._process_loop, daemon=True, name='mic_proc').start()
+        threading.Thread(target=self._capture_loop, daemon=True, name='mic_capture').start()
 
-        self._stream.start_stream()
-        name = self._pa.get_device_info_by_index(self._device_idx)['name']
         self.get_logger().info(
-            f'Mic node running — [{self._device_idx}] {name!r} '
-            f'@ {self._capture_rate} Hz, {self._capture_channels}ch'
+            f'Mic node running — {alsa_dev} @ {ASR_RATE} Hz, {self._capture_channels}ch→mono'
         )
 
     # ── Device detection ───────────────────────────────────────────────────────
 
-    def _find_device(self, hint: str) -> int:
-        count = self._pa.get_device_count()
-        self.get_logger().info('Available audio input devices:')
-        first_input = None
-
-        for i in range(count):
-            info = self._pa.get_device_info_by_index(i)
-            if info['maxInputChannels'] < 1:
-                continue
-            name = info['name']
-            self.get_logger().info(f'  [{i}] {name}  ({int(info["defaultSampleRate"])} Hz, {int(info["maxInputChannels"])}ch)')
-            if first_input is None:
-                first_input = i
-            # Match XVF3800 aliases first; hint='xvf' won't match a laptop mic
-            # so we fall through to the default device naturally
-            for alias in (hint, 'respeaker', 'xmos', 'xvf', 'vocal'):
-                if alias.lower() in name.lower():
-                    self.get_logger().info(f'Selected [{i}] via "{alias}"')
-                    return i
-
-        # Fall back to system default input (laptop mic on WSL2 / desktop)
+    def _find_alsa_device(self, hint: str) -> str:
+        """Return plughw device string for the first input card matching hint."""
         try:
-            default_idx = self._pa.get_default_input_device_info()['index']
-            self.get_logger().info(
-                f'No XVF3800 found — using default input device [{default_idx}]. '
-                f'Override with ROS param device_name_hint if needed.'
-            )
-            return default_idx
-        except OSError:
-            pass
+            result = subprocess.run(
+                ['arecord', '-l'], capture_output=True, text=True, timeout=5)
+            lines = result.stdout.splitlines()
+        except Exception:
+            lines = []
 
-        idx = first_input if first_input is not None else 0
-        self.get_logger().warn(f'Using first available input device [{idx}].')
-        return idx
+        aliases = [a for a in (hint, 'respeaker', 'xmos', 'xvf', 'vocal') if a]
 
-    def _open_stream(self, device_idx: int):
-        """Try common rates and channel counts; auto-detect what the device supports."""
-        info = self._pa.get_device_info_by_index(device_idx)
-        max_ch = int(info['maxInputChannels'])
-        # Prefer stereo for XVF3800; fall back to mono for laptop mics
-        channel_options = [2, 1] if max_ch >= 2 else [1]
+        self.get_logger().info('Available ALSA capture devices:')
+        first_card = first_dev = None
 
-        for rate in (16000, 48000):
-            for channels in channel_options:
-                chunk = int(rate * VAD_FRAME_MS / 1000)
-                try:
-                    stream = self._pa.open(
-                        format=pyaudio.paInt16,
-                        channels=channels,
-                        rate=rate,
-                        input=True,
-                        input_device_index=device_idx,
-                        frames_per_buffer=chunk,
-                        stream_callback=self._audio_cb,
-                        start=False,  # don't fire callback until start_stream() is called
-                    )
+        for line in lines:
+            if not line.startswith('card '):
+                continue
+            self.get_logger().info(f'  {line}')
+            m = re.match(r'card (\d+): \S+ \[([^\]]+)\], device (\d+):', line)
+            if not m:
+                continue
+            card_num, card_name, dev_num = m.group(1), m.group(2), m.group(3)
+
+            for alias in aliases:
+                if alias.lower() in card_name.lower():
+                    dev_str = f'plughw:{card_num},{dev_num}'
                     self.get_logger().info(
-                        f'Audio stream opened: {rate} Hz, {channels}ch'
-                    )
-                    return stream, rate, channels
-                except Exception:
-                    continue
+                        f'Selected {dev_str!r} via "{alias}" ({card_name})')
+                    return dev_str
 
-        raise RuntimeError(
-            f'Cannot open device [{device_idx}] at any supported rate/channel combo. '
-            f'Run find_audio_device.py to inspect the device.'
-        )
+            if first_card is None:
+                first_card, first_dev = card_num, dev_num
 
-    # ── PyAudio callback ───────────────────────────────────────────────────────
+        if first_card is not None:
+            dev_str = f'plughw:{first_card},{first_dev}'
+            self.get_logger().warn(
+                f'No XVF3800 found — using first capture device: {dev_str}')
+            return dev_str
 
-    def _audio_cb(self, in_data, frame_count, time_info, status):
+        self.get_logger().warn('No capture devices found — using plughw:0,0')
+        return 'plughw:0,0'
+
+    def _find_pulse_source(self, hint: str) -> str:
+        """Return the PulseAudio source name matching hint, or empty string."""
         try:
-            self._raw_q.put_nowait(in_data)
-        except queue.Full:
+            r = subprocess.run(
+                ['pactl', 'list', 'short', 'sources'],
+                capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                parts = line.split('\t')
+                if len(parts) < 2:
+                    continue
+                name = parts[1]
+                for alias in (hint, 'xvf', 'respeaker', 'xmos', 'vocal', 'array'):
+                    if alias and alias.lower() in name.lower():
+                        return name
+        except Exception:
             pass
-        return (None, pyaudio.paContinue)
+        return ''
 
-    # ── Processing thread ──────────────────────────────────────────────────────
+    def _open_capture(self, hint: str, alsa_dev: str) -> tuple:
+        """Try parecord (PulseAudio) first, then arecord with direct ALSA."""
+        # 1. PulseAudio — preferred; PulseAudio owns hw devices on desktop Linux
+        pulse_src = self._find_pulse_source(hint)
+        if pulse_src:
+            cmd = ['parecord', '-d', pulse_src,
+                   f'--rate={ASR_RATE}', '--format=s16le', '--channels=1', '--raw']
+            self.get_logger().info(f'Trying PulseAudio: {" ".join(cmd)}')
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(0.4)
+            if proc.poll() is None:
+                self.get_logger().info(f'Opened via PulseAudio source: {pulse_src}')
+                return proc, 1
+            err = proc.stderr.read().decode(errors='replace').strip()
+            self.get_logger().warn(f'parecord failed: {err}')
 
-    def _process_loop(self):
+        # 2. Direct ALSA — works when PulseAudio is not running
+        for channels in (2, 1, 4):
+            cmd = ['arecord', '-D', alsa_dev, '-f', 'S16_LE',
+                   '-r', str(ASR_RATE), '-c', str(channels), '-t', 'raw']
+            self.get_logger().info(f'Trying ALSA: {" ".join(cmd)}')
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(0.4)
+            if proc.poll() is None:
+                self.get_logger().info(f'Opened via ALSA with {channels} channel(s)')
+                return proc, channels
+            err = proc.stderr.read().decode(errors='replace').strip()
+            self.get_logger().warn(f'arecord {channels}ch failed: {err}')
+
+        raise RuntimeError(f'Cannot open capture for {alsa_dev}')
+
+    # ── Capture loop ───────────────────────────────────────────────────────────
+
+    def _capture_loop(self):
+        ch = self._capture_channels
+        read_bytes = VAD_FRAME_BYTES * ch * 4  # read in larger chunks for efficiency
+        buf = b''
         while rclpy.ok():
-            try:
-                raw = self._raw_q.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            try:
-                self._process_chunk(raw)
-            except Exception as exc:
-                self.get_logger().error(f'Process error: {exc}')
-
-    def _process_chunk(self, raw_bytes: bytes):
-        samples = np.frombuffer(raw_bytes, dtype=np.int16)
-        # Stereo → mono: take channel 0 (every other sample).
-        # Mono: use as-is.
-        mono = samples[::self._capture_channels].copy()
-
-        if self._capture_rate != ASR_RATE:
-            mono_bytes, self._ratecv_state = audioop.ratecv(
-                mono.tobytes(), SAMPLE_WIDTH, 1,
-                self._capture_rate, ASR_RATE, self._ratecv_state,
-            )
-        else:
-            mono_bytes = mono.tobytes()
-
-        self._vad_buf += mono_bytes
-        while len(self._vad_buf) >= VAD_FRAME_BYTES:
-            frame = self._vad_buf[:VAD_FRAME_BYTES]
-            self._vad_buf = self._vad_buf[VAD_FRAME_BYTES:]
-            self._vad_step(frame)
+            chunk = self._proc.stdout.read(read_bytes)
+            if not chunk:
+                self.get_logger().error('arecord process ended unexpectedly')
+                break
+            buf += chunk
+            frame_bytes_ch = VAD_FRAME_BYTES * ch
+            while len(buf) >= frame_bytes_ch:
+                raw = buf[:frame_bytes_ch]
+                buf = buf[frame_bytes_ch:]
+                # Downmix to mono by taking channel 0 (every ch-th sample)
+                if ch > 1:
+                    samples = np.frombuffer(raw, dtype=np.int16)
+                    raw = samples[::ch].copy().tobytes()
+                try:
+                    self._vad_step(raw)
+                except Exception as exc:
+                    self.get_logger().error(f'VAD error: {exc}')
 
     # ── VAD state machine ──────────────────────────────────────────────────────
 
@@ -233,12 +231,8 @@ class MicNode(Node):
 
     def destroy_node(self):
         try:
-            self._stream.stop_stream()
-            self._stream.close()
-        except Exception:
-            pass
-        try:
-            self._pa.terminate()
+            self._proc.terminate()
+            self._proc.wait(timeout=2)
         except Exception:
             pass
         super().destroy_node()

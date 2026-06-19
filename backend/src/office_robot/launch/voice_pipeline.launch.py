@@ -59,7 +59,8 @@ def generate_launch_description():
                 # If the USB speaker is not the default:
                 #   run `aplay -l` on the Jetson to find the card name, then set e.g.:
                 #   'alsa_device': 'hw:CARD=Speaker,DEV=0'
-                'alsa_device': '',
+                'alsa_device': 'plughw:CARD=C980Pro,DEV=0',
+                'piper_voice': '/usr/local/share/piper-voices/en_US-ryan-high.onnx',
             }],
         ),
         Node(

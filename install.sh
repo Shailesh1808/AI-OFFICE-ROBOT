@@ -70,15 +70,28 @@ info "Python packages..."
 # --break-system-packages is needed on Ubuntu 24.04+ (PEP 668).
 # On Ubuntu 22.04 it is silently ignored, so this works on both.
 pip3 install --break-system-packages --upgrade pip --quiet
-pip3 install --break-system-packages pyaudio webrtcvad faster-whisper requests numpy
+pip3 install --break-system-packages pyaudio webrtcvad-wheels faster-whisper requests numpy
 
 echo ""
-echo "  ┌─ GPU ASR (optional) ────────────────────────────────────────────────┐"
-echo "  │  PyPI ctranslate2 aarch64 = CPU-only. For CUDA ASR on JetPack 6.1:│"
-echo "  │    sudo apt install cmake libopenblas-dev                           │"
-echo "  │    pip3 install 'ctranslate2>=4.4.0,<4.5.0' --no-binary :all:      │"
-echo "  │  (4.4.x works with CUDA 12.2 + cuDNN 8; 4.5+ needs cuDNN 9)       │"
-echo "  └─────────────────────────────────────────────────────────────────────┘"
+echo "  ┌─ GPU ASR (optional, ~30-60 min) ─────────────────────────────────────────┐"
+echo "  │  PyPI ctranslate2 aarch64 = CPU-only. Build from source for CUDA:       │"
+echo "  │                                                                          │"
+echo "  │    sudo apt install cuda-toolkit-12-6 libcudnn9-cuda-12 \\               │"
+echo "  │                     libcudnn9-dev-cuda-12 cmake libopenblas-dev          │"
+echo "  │    export PATH=/usr/local/cuda-12.6/bin:\$PATH                           │"
+echo "  │    git clone --recursive https://github.com/OpenNMT/CTranslate2 /tmp/CT2│"
+echo "  │    mkdir /tmp/CT2/build && cd /tmp/CT2/build                             │"
+echo "  │    cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_CUDA=ON -DWITH_CUDNN=ON \\ │"
+echo "  │      -DWITH_MKL=OFF -DWITH_OPENBLAS=ON -DOPENMP_RUNTIME=COMP \\          │"
+echo "  │      -DOPENBLAS_INCLUDE_DIR=/usr/include/aarch64-linux-gnu \\             │"
+echo "  │      -DOPENBLAS_LIBRARY=/usr/lib/aarch64-linux-gnu/libopenblas.so \\     │"
+echo "  │      -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.6 \\                     │"
+echo "  │      -DCUDNN_INCLUDE_DIR=/usr/include \\                                 │"
+echo "  │      -DCUDNN_LIBRARIES=/usr/lib/aarch64-linux-gnu/libcudnn.so \\         │"
+echo "  │      -DCMAKE_INSTALL_PREFIX=/usr/local                                   │"
+echo "  │    make -j\$(nproc) && sudo make install && sudo ldconfig                 │"
+echo "  │    pip3 install /tmp/CT2/python --break-system-packages                  │"
+echo "  └──────────────────────────────────────────────────────────────────────────┘"
 echo ""
 
 # ── 4. ollama ──────────────────────────────────────────────────────────────────
