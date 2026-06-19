@@ -36,6 +36,13 @@ class SpeakerTextPayload(TypedDict):
     source: str        # "qa" | "navigation" | "system"
 
 
+class MbotCommandPayload(TypedDict):
+    """Published on /outputs/mbot/command by navigation_node."""
+    command: str       # single char: F | B | R | L | S
+    source_text: str   # original voice command text
+    source: str        # "navigation"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 import json

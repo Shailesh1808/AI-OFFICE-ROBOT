@@ -25,14 +25,16 @@ setup(
     entry_points={
         'console_scripts': [
             # inputs/mic
-            'mic_node   = office_robot.inputs.mic.mic_node:main',
-            'asr_node   = office_robot.inputs.mic.asr_node:main',
+            'mic_node         = office_robot.inputs.mic.mic_node:main',
+            'asr_node         = office_robot.inputs.mic.asr_node:main',
             # brain
-            'brain_node = office_robot.brain.brain_node:main',
+            'brain_node       = office_robot.brain.brain_node:main',
             # brain/classifiers
-            'qa_node    = office_robot.brain.classifiers.qa.qa_node:main',
+            'qa_node          = office_robot.brain.classifiers.qa.qa_node:main',
+            'navigation_node  = office_robot.brain.classifiers.navigation.navigation_node:main',
             # outputs
-            'tts_node   = office_robot.outputs.speaker.tts_node:main',
+            'tts_node         = office_robot.outputs.speaker.tts_node:main',
+            'mbot_node        = office_robot.outputs.mbot.mbot_node:main',
         ],
     },
 )

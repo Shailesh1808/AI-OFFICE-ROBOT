@@ -41,6 +41,12 @@ def generate_launch_description():
             name='qa_node',
             output='screen',
         ),
+        Node(
+            package='office_robot',
+            executable='navigation_node',
+            name='navigation_node',
+            output='screen',
+        ),
 
         # ── outputs ────────────────────────────────────────────────────────────
         Node(
@@ -54,6 +60,18 @@ def generate_launch_description():
                 #   run `aplay -l` on the Jetson to find the card name, then set e.g.:
                 #   'alsa_device': 'hw:CARD=Speaker,DEV=0'
                 'alsa_device': '',
+            }],
+        ),
+        Node(
+            package='office_robot',
+            executable='mbot_node',
+            name='mbot_node',
+            output='screen',
+            parameters=[{
+                # Leave empty for terminal-only mode.
+                # When mBot is physically connected, set to its serial port, e.g.:
+                #   'serial_port': '/dev/ttyUSB0'
+                'serial_port': '',
             }],
         ),
 
