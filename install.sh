@@ -26,8 +26,10 @@ sudo apt-get install -y \
 
 # ── 2. Python packages ─────────────────────────────────────────────────────────
 info "Python packages..."
-pip3 install --upgrade pip --quiet
-pip3 install pyaudio webrtcvad faster-whisper requests numpy
+# --break-system-packages is needed on Ubuntu 24.04+ (PEP 668).
+# On Ubuntu 22.04 it is silently ignored, so this works on both.
+pip3 install --break-system-packages --upgrade pip --quiet
+pip3 install --break-system-packages pyaudio webrtcvad faster-whisper requests numpy
 
 echo ""
 echo "  ┌─ GPU ASR (optional) ────────────────────────────────────────────────┐"
